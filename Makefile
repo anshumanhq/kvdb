@@ -1,5 +1,5 @@
 CC        := gcc
-CFLAGS    := -Wall -Wextra -Werror -std=c11 -MMD -MP
+CFLAGS    := -Wall -Wextra -Werror -std=c11 -MMD -MP -D_POSIX_C_SOURCE=200809L
 SRC_DIR   := src
 TEST_DIR  := tests
 BUILD_DIR := build
