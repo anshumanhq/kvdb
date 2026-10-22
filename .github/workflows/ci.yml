@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    name: Build (ASan+UBSan) & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+
+      - name: Build debug
+        run: make debug
+
+      - name: Run tests (ASan + UBSan)
+        run: make test
+
+  valgrind-on-release:
+    name: Valgrind (release build)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential valgrind
+
+      - name: Build release
+        run: make release
+
+      - name: Run tests (release build)
+        run: make test-release
+
+      - name: Valgrind leak check
+        run: |
+          valgrind --leak-check=full \
+                   --track-origins=yes \
+                   --error-exitcode=1 \
+                   ./build/test_hashtable_release
