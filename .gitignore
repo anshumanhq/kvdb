@@ -1,0 +1,53 @@
+# Prerequisites
+*.d
+
+# Object files
+*.o
+*.ko
+*.obj
+*.elf
+
+# Libraries
+*.lib
+*.a
+*.so
+*.so.*
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
+*.i*86
+*.x86_64
+*.hex
+
+# Debug aur build dirs
+build/
+cmake-build-*/
+*.log
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Sanitizer / Valgrind outputs
+*.asan
+*.ubsan
+vgcore.*
+core
+core.*
+
+# Coverage / profiling
+*.gcda
+*.gcno
+*.profraw
+coverage/
+
+# clangd / LSP
+.cache/
+compile_commands.json
+
+# clang-format cache
+.clang-format-ignore
