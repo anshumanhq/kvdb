@@ -46,6 +46,14 @@ test-release: $(BUILD_DIR)/test_hashtable_release
 $(BUILD_DIR)/test_hashtable_release: $(TEST_DIR)/test_hashtable.c $(SRC_DIR)/hashtable.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ $^
 
+# Release optimization ke saath benchmark build aur run karega
+bench: CFLAGS += $(RELEASE_CFLAGS) -I$(SRC_DIR)
+bench: $(BUILD_DIR)/ht_bench
+	./$(BUILD_DIR)/ht_bench
+
+$(BUILD_DIR)/ht_bench: bench/ht_bench.c $(SRC_DIR)/hashtable.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $^
+
 clean:
 	rm -rf $(BUILD_DIR)
 
