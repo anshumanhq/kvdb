@@ -12,6 +12,13 @@
 #define BACKLOG 10
 #define BUF_SIZE 4096
 
+static void send_response(int fd, const char *msg) {
+    ssize_t bytes_sent = write(fd, msg, strlen(msg));
+    if (bytes_sent < 0) {
+        log_error("Failed to send response to client");
+    }
+}
+
 int server_start(int port) {
     int server_fd;
     struct sockaddr_in address;
@@ -55,22 +62,18 @@ int server_start(int port) {
             int parsed = resp_parse(buffer, bytes_read, &cmd);
             
             if (parsed == -1) {
-                const char *err = "-ERR Protocol error\r\n";
-                write(client_fd, err, strlen(err));
+                send_response(client_fd, "-ERR Protocol error\r\n");
             } else if (parsed > 0) {
-                // Filhaal sirf PING aur ECHO handle kar rahe hain
                 if (strcasecmp(cmd.argv[0], "PING") == 0) {
-                    const char *res = "+PONG\r\n";
-                    write(client_fd, res, strlen(res));
+                    send_response(client_fd, "+PONG\r\n");
                 } 
                 else if (strcasecmp(cmd.argv[0], "ECHO") == 0 && cmd.argc == 2) {
                     char res[1024];
                     snprintf(res, sizeof(res), "$%zu\r\n%s\r\n", strlen(cmd.argv[1]), cmd.argv[1]);
-                    write(client_fd, res, strlen(res));
+                    send_response(client_fd, res);
                 }
                 else {
-                    const char *err = "-ERR unknown command\r\n";
-                    write(client_fd, err, strlen(err));
+                    send_response(client_fd, "-ERR unknown command\r\n");
                 }
                 command_free(&cmd);
             }
