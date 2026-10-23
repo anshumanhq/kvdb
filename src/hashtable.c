@@ -1,14 +1,12 @@
 #include "hashtable.h"
-
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>   /* time() ke liye */
 
-#define HT_INITIAL_SIZE      16
-#define HT_LOAD_HIGH         0.75   /* isse zyada pe double */
-#define HT_LOAD_LOW          0.10   /* isse kam pe half */
+#define HT_INITIAL_SIZE 16
+#define HT_LOAD_HIGH    0.75
+#define HT_LOAD_LOW     0.10
 
-/* FNV-1a 64-bit — fast, decent distribution.
- * TODO: SipHash-2-4 DoS-resistant hash ke liye — Phase 2 ke baad. */
 static uint64_t fnv1a(const void *data, size_t len)
 {
     const uint8_t *p = (const uint8_t *)data;
@@ -20,7 +18,6 @@ static uint64_t fnv1a(const void *data, size_t len)
     return h;
 }
 
-/* Agla power of 2 >= n. Bit-smearing trick. */
 static size_t next_pow2(size_t n)
 {
     if (n < 2) return 2;
@@ -69,8 +66,6 @@ void ht_free(hashtable *ht)
     free(ht);
 }
 
-/* Do buckets array ko resize karta hai. Purane entries ko naye buckets
- * mein re-distribute. Purani buckets free ho jaati hain. */
 static int ht_resize(hashtable *ht, size_t new_size)
 {
     entry **nb = calloc(new_size, sizeof(entry *));
@@ -81,7 +76,7 @@ static int ht_resize(hashtable *ht, size_t new_size)
         entry *e = ht->buckets[i];
         while (e) {
             entry *next = e->next;
-            size_t idx = e->hash & nmask;   /* cached hash reuse */
+            size_t idx = e->hash & nmask;
             e->next = nb[idx];
             nb[idx] = e;
             e = next;
@@ -101,7 +96,7 @@ int ht_set(hashtable *ht,
     uint64_t h = fnv1a(key, key_len);
     size_t idx = h & ht->mask;
 
-    /* Update path: pehle existing dhoondo */
+    /* Update path */
     for (entry *e = ht->buckets[idx]; e; e = e->next) {
         if (e->hash == h && e->key_len == key_len &&
             memcmp(e->key, key, key_len) == 0) {
@@ -111,6 +106,7 @@ int ht_set(hashtable *ht,
             free(e->value);
             e->value = nv;
             e->val_len = val_len;
+            e->expire_at = 0; /* Update karne pe TTL reset */
             return 0;
         }
     }
@@ -130,12 +126,12 @@ int ht_set(hashtable *ht,
     e->key_len = key_len;
     e->val_len = val_len;
     e->hash    = h;
+    e->expire_at = 0; /* Default: no expiry */
     e->next    = ht->buckets[idx];
     ht->buckets[idx] = e;
     ht->used++;
 
     if ((double)ht->used / (double)ht->size > HT_LOAD_HIGH) {
-        /* Resize fail hue toh bhi entry insert ho chuki hai — dono theek */
         (void)ht_resize(ht, ht->size * 2);
     }
     return 1;
@@ -151,6 +147,10 @@ void *ht_get(hashtable *ht,
     for (entry *e = ht->buckets[idx]; e; e = e->next) {
         if (e->hash == h && e->key_len == key_len &&
             memcmp(e->key, key, key_len) == 0) {
+            /* Lazy expiry check */
+            if (e->expire_at > 0 && e->expire_at <= time(NULL)) {
+                return NULL;
+            }
             if (out_len) *out_len = e->val_len;
             return e->value;
         }
@@ -163,7 +163,6 @@ int ht_del(hashtable *ht, const char *key, size_t key_len)
     uint64_t h = fnv1a(key, key_len);
     size_t idx = h & ht->mask;
 
-    /* Double-pointer trick — head aur non-head dono ke liye ek hi code path */
     entry **prev = &ht->buckets[idx];
     for (entry *e = *prev; e; prev = &e->next, e = e->next) {
         if (e->hash == h && e->key_len == key_len &&
@@ -183,3 +182,45 @@ int ht_del(hashtable *ht, const char *key, size_t key_len)
 }
 
 size_t ht_count(const hashtable *ht) { return ht->used; }
+
+/* TTL Functions */
+
+int ht_set_expire(hashtable *ht, const char *key, size_t key_len, int64_t expire_at)
+{
+    uint64_t h = fnv1a(key, key_len);
+    size_t idx = h & ht->mask;
+
+    for (entry *e = ht->buckets[idx]; e; e = e->next) {
+        if (e->hash == h && e->key_len == key_len &&
+            memcmp(e->key, key, key_len) == 0) {
+            /* Agar key pehle se expire ho chuki hai, toh naya set na karein */
+            if (e->expire_at > 0 && e->expire_at <= time(NULL)) {
+                return 0; 
+            }
+            e->expire_at = expire_at;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int64_t ht_get_expire(hashtable *ht, const char *key, size_t key_len)
+{
+    uint64_t h = fnv1a(key, key_len);
+    size_t idx = h & ht->mask;
+
+    for (entry *e = ht->buckets[idx]; e; e = e->next) {
+        if (e->hash == h && e->key_len == key_len &&
+            memcmp(e->key, key, key_len) == 0) {
+            
+            if (e->expire_at > 0 && e->expire_at <= time(NULL)) {
+                return -2; /* Expired */
+            }
+            if (e->expire_at == 0) {
+                return -1; /* No TTL set */
+            }
+            return e->expire_at; /* Unix timestamp */
+        }
+    }
+    return -2; /* Key not found (Redis standard) */
+}
