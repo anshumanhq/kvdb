@@ -1,0 +1,6 @@
+build/
+.git/
+*.md
+tests/
+bench/
+.vscode/
