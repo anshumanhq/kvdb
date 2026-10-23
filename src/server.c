@@ -13,6 +13,7 @@
 #include <sys/epoll.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <time.h>   /* time() ke liye */
 
 #define BACKLOG 10
 #define MAX_EVENTS 1024
@@ -45,7 +46,6 @@ static void process_command(client_t *client, command_t *cmd) {
     else if (strcasecmp(cmd->argv[0], "SET") == 0 && cmd->argc == 3) {
         int rc = ht_set(db, cmd->argv[1], strlen(cmd->argv[1]), cmd->argv[2], strlen(cmd->argv[2]));
         if (rc >= 0) {
-            // DB mein save hone ke baad hi AOF mein likho
             aof_append("SET", cmd->argv[1], cmd->argv[2]);
             send_response(client->fd, "+OK\r\n");
         }
@@ -70,11 +70,38 @@ static void process_command(client_t *client, command_t *cmd) {
     else if (strcasecmp(cmd->argv[0], "DEL") == 0 && cmd->argc == 2) {
         int rc = ht_del(db, cmd->argv[1], strlen(cmd->argv[1]));
         if (rc == 1) {
-            // Delete hone ke baad hi AOF mein likho
             aof_append("DEL", cmd->argv[1], NULL);
             send_response(client->fd, ":1\r\n");
         }
         else send_response(client->fd, ":0\r\n");
+    }
+    else if (strcasecmp(cmd->argv[0], "EXPIRE") == 0 && cmd->argc == 3) {
+        int seconds = atoi(cmd->argv[2]);
+        if (seconds > 0) {
+            int64_t expire_at = time(NULL) + seconds;
+            int rc = ht_set_expire(db, cmd->argv[1], strlen(cmd->argv[1]), expire_at);
+            if (rc == 1) {
+                // Persistence mein TTL save karne ke liye (Optional for now)
+                send_response(client->fd, ":1\r\n");
+            }
+            else send_response(client->fd, ":0\r\n");
+        } else {
+            send_response(client->fd, "-ERR invalid expire time\r\n");
+        }
+    }
+    else if (strcasecmp(cmd->argv[0], "TTL") == 0 && cmd->argc == 2) {
+        int64_t expire_at = ht_get_expire(db, cmd->argv[1], strlen(cmd->argv[1]));
+        if (expire_at == -2) {
+            send_response(client->fd, ":-2\r\n"); // Key nahi hai ya expired hai
+        } else if (expire_at == -1) {
+            send_response(client->fd, ":-1\r\n"); // TTL set nahi hai
+        } else {
+            int64_t remaining = expire_at - time(NULL);
+            if (remaining < 0) remaining = 0;
+            char res[32];
+            snprintf(res, sizeof(res), ":%ld\r\n", (long)remaining);
+            send_response(client->fd, res);
+        }
     }
     else {
         send_response(client->fd, "-ERR unknown command\r\n");
@@ -90,9 +117,7 @@ int server_start(int port) {
     db = ht_create(16);
     if (!db) return -1;
 
-    // 1. Pehle purana data load karo
     aof_load(db, "appendonly.aof");
-    // 2. Phir naya data likhne ke liye file open karo
     aof_open("appendonly.aof");
 
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
