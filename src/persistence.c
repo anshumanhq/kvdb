@@ -23,7 +23,6 @@ int aof_open(const char *filename) {
 
 void aof_close(void) {
     if (aof_fd != -1) {
-        fsync(aof_fd);
         close(aof_fd);
         aof_fd = -1;
     }
@@ -32,8 +31,9 @@ void aof_close(void) {
 void aof_append(const char *cmd, const char *key, const char *val) {
     if (aof_fd == -1) return;
 
+    // Dynamic allocation to prevent stack overflow for large values
     size_t max_len = strlen(cmd) + strlen(key) + (val ? strlen(val) : 0) + 100;
-    char *buffer = malloc(max_len); // Dynamic allocation to prevent stack overflow
+    char *buffer = malloc(max_len);
     if (!buffer) return;
 
     int len = 0;
@@ -50,7 +50,9 @@ void aof_append(const char *cmd, const char *key, const char *val) {
         if (written != len) {
             log_error("Failed to write to AOF file");
         }
-        fsync(aof_fd); // Fsync for durability
+        
+        // fsync(aof_fd); // <-- REMOVED: Blocking fsync kills performance. 
+        // Real Redis uses background fsync everysec.
     }
     free(buffer);
 }

@@ -38,7 +38,7 @@ static void send_all(int fd, const char *buf, size_t len) {
             log_error("Failed to write to client");
             return;
         }
-        if (n == 0) break; // Safety check
+        if (n == 0) break;
         sent += n;
     }
 }
@@ -76,11 +76,20 @@ static void process_command(client_t *client, command_t *cmd) {
         size_t val_len = 0;
         void *val = ht_get(db, cmd->argv[1], strlen(cmd->argv[1]), &val_len);
         if (val) {
-            char res[64];
-            int len = snprintf(res, sizeof(res), "$%zu\r\n", val_len);
-            send_all(client->fd, res, len);
-            send_all(client->fd, val, val_len);
-            send_response(client->fd, "\r\n");
+            // OPTIMIZATION: Single write for GET response to prevent network congestion
+            size_t total_len = val_len + 32;
+            char *outbuf = malloc(total_len);
+            if (outbuf) {
+                int hlen = snprintf(outbuf, 32, "$%zu\r\n", val_len);
+                memcpy(outbuf + hlen, val, val_len);
+                memcpy(outbuf + hlen + val_len, "\r\n", 2);
+                
+                // Send everything in one go
+                send_all(client->fd, outbuf, hlen + val_len + 2);
+                free(outbuf);
+            } else {
+                send_response(client->fd, "-ERR out of memory\r\n");
+            }
         } else {
             send_response(client->fd, "$-1\r\n");
         }
@@ -156,7 +165,6 @@ int server_start(int port) {
         perror("listen"); return -1;
     }
 
-    // CRITICAL FIX: Server socket ko non-blocking banao warna accept loop hang ho jayega
     set_nonblocking(server_fd);
 
     int epoll_fd = epoll_create1(0);
@@ -189,7 +197,7 @@ int server_start(int port) {
                     int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
                     
                     if (client_fd < 0) {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) break; // Drained
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
                         if (errno == EINTR) continue;
                         log_error("accept failed");
                         break;
@@ -205,9 +213,7 @@ int server_start(int port) {
 
                     ev.events = EPOLLIN | EPOLLET;
                     ev.data.ptr = client;
-                    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev) == -1) {
-                        log_error("epoll_ctl add failed");
-                    }
+                    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev);
                     
                     log_info("Client connected (fd=%d)", client_fd);
                 }
@@ -218,6 +224,13 @@ int server_start(int port) {
                 
                 // ET Read Loop
                 while (1) {
+                    // FIX: Buffer full check
+                    if (client->buf_len >= BUF_SIZE - 1) {
+                        log_error("Buffer full, closing client (fd=%d)", client->fd);
+                        close_client = 1;
+                        break;
+                    }
+
                     ssize_t bytes_read = read(client->fd, client->buffer + client->buf_len, BUF_SIZE - client->buf_len - 1);
                     
                     if (bytes_read < 0) {
@@ -228,7 +241,7 @@ int server_start(int port) {
                         break;
                     }
                     if (bytes_read == 0) {
-                        close_client = 1; // Client closed
+                        close_client = 1;
                         break; 
                     }
 

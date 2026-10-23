@@ -34,8 +34,9 @@ TTL <key>
 ### Phase 3: Network Server (Using `redis-benchmark`, 50 concurrent clients, 100k requests)
 | Command | Throughput (ops/sec) | p50 Latency (ms) | p99 Latency (ms) |
 |---------|----------------------|------------------|------------------|
-| PING    | ~30,800              | 0.879            | 3.079            |
-| SET     | ~33,700              | 0.647            | 3.855            |
+| PING    | ~26,400              | 0.783            | 6.647            |
+| GET     | ~27,000              | 1.247            | 4.407            |
+| SET     | ~14,700              | 2.975            | 6.367            |
 
 *Tested on: Ubuntu 24.04 (WSL2), GCC 13.2.0, -O2 optimization.*
 
