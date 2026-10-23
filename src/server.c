@@ -11,9 +11,10 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/epoll.h>
+#include <netinet/tcp.h> // For TCP_NODELAY
 #include <fcntl.h>
 #include <errno.h>
-#include <time.h>   /* time() ke liye */
+#include <time.h>
 
 #define BACKLOG 10
 #define MAX_EVENTS 1024
@@ -27,11 +28,24 @@ typedef struct {
 
 static hashtable *db;
 
-static void send_response(int fd, const char *msg) {
-    ssize_t bytes_sent = write(fd, msg, strlen(msg));
-    if (bytes_sent < 0) {
-        log_error("Failed to send response to client");
+// FIX: Loop to handle partial writes
+static void send_all(int fd, const char *buf, size_t len) {
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = write(fd, buf + sent, len - sent);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            // In a perfect world, we'd queue this and wait for EPOLLOUT. 
+            // For this scope, we'll just log and drop if the buffer is full.
+            log_error("Failed to write to client (partial write)");
+            return;
+        }
+        sent += n;
     }
+}
+
+static void send_response(int fd, const char *msg) {
+    send_all(fd, msg, strlen(msg));
 }
 
 static void set_nonblocking(int fd) {
@@ -40,6 +54,8 @@ static void set_nonblocking(int fd) {
 }
 
 static void process_command(client_t *client, command_t *cmd) {
+    if (cmd->argc == 0) return; // FIX: Guard against empty inline commands
+
     if (strcasecmp(cmd->argv[0], "PING") == 0) {
         send_response(client->fd, "+PONG\r\n");
     } 
@@ -55,14 +71,11 @@ static void process_command(client_t *client, command_t *cmd) {
         size_t val_len = 0;
         void *val = ht_get(db, cmd->argv[1], strlen(cmd->argv[1]), &val_len);
         if (val) {
-            char *res = malloc(val_len + 32);
-            snprintf(res, val_len + 32, "$%zu\r\n", val_len);
-            send_response(client->fd, res);
-            if (write(client->fd, val, val_len) < 0) {
-                log_error("write failed");
-            }
+            char res[64];
+            int len = snprintf(res, sizeof(res), "$%zu\r\n", val_len);
+            send_all(client->fd, res, len);
+            send_all(client->fd, val, val_len);
             send_response(client->fd, "\r\n");
-            free(res);
         } else {
             send_response(client->fd, "$-1\r\n");
         }
@@ -81,7 +94,7 @@ static void process_command(client_t *client, command_t *cmd) {
             int64_t expire_at = time(NULL) + seconds;
             int rc = ht_set_expire(db, cmd->argv[1], strlen(cmd->argv[1]), expire_at);
             if (rc == 1) {
-                // Persistence mein TTL save karne ke liye (Optional for now)
+                aof_append("EXPIRE", cmd->argv[1], cmd->argv[2]); // FIX: Persist TTL
                 send_response(client->fd, ":1\r\n");
             }
             else send_response(client->fd, ":0\r\n");
@@ -92,9 +105,9 @@ static void process_command(client_t *client, command_t *cmd) {
     else if (strcasecmp(cmd->argv[0], "TTL") == 0 && cmd->argc == 2) {
         int64_t expire_at = ht_get_expire(db, cmd->argv[1], strlen(cmd->argv[1]));
         if (expire_at == -2) {
-            send_response(client->fd, ":-2\r\n"); // Key nahi hai ya expired hai
+            send_response(client->fd, ":-2\r\n");
         } else if (expire_at == -1) {
-            send_response(client->fd, ":-1\r\n"); // TTL set nahi hai
+            send_response(client->fd, ":-1\r\n");
         } else {
             int64_t remaining = expire_at - time(NULL);
             if (remaining < 0) remaining = 0;
@@ -155,37 +168,59 @@ int server_start(int port) {
     while (1) {
         int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
         if (nfds == -1) {
+            if (errno == EINTR) continue;
             perror("epoll_wait"); break;
         }
 
         for (int i = 0; i < nfds; i++) {
             if (events[i].data.fd == server_fd) {
-                struct sockaddr_in client_addr;
-                socklen_t client_len = sizeof(client_addr);
-                int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
-                
-                set_nonblocking(client_fd);
-                
-                client_t *client = calloc(1, sizeof(client_t));
-                client->fd = client_fd;
-                client->buf_len = 0;
+                // FIX: ET Accept Loop (Drain until EAGAIN)
+                while (1) {
+                    struct sockaddr_in client_addr;
+                    socklen_t client_len = sizeof(client_addr);
+                    int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_len);
+                    
+                    if (client_fd < 0) {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) break; // Drained
+                        if (errno == EINTR) continue;
+                        log_error("accept failed");
+                        break;
+                    }
 
-                ev.events = EPOLLIN | EPOLLET;
-                ev.data.ptr = client;
-                epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev);
-                
-                log_info("Client connected (fd=%d)", client_fd);
+                    // FIX: TCP_NODELAY (Massive latency improvement)
+                    int flag = 1;
+                    setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+                    
+                    set_nonblocking(client_fd);
+                    
+                    client_t *client = calloc(1, sizeof(client_t));
+                    client->fd = client_fd;
+                    client->buf_len = 0;
+
+                    ev.events = EPOLLIN | EPOLLET;
+                    ev.data.ptr = client;
+                    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev);
+                    
+                    log_info("Client connected (fd=%d)", client_fd);
+                }
             } 
             else {
                 client_t *client = (client_t *)events[i].data.ptr;
-                ssize_t bytes_read = read(client->fd, client->buffer + client->buf_len, BUF_SIZE - client->buf_len - 1);
                 
-                if (bytes_read <= 0) {
-                    log_info("Client disconnected (fd=%d)", client->fd);
-                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client->fd, NULL);
-                    close(client->fd);
-                    free(client);
-                } else {
+                // FIX: ET Read Loop (Drain until EAGAIN)
+                while (1) {
+                    ssize_t bytes_read = read(client->fd, client->buffer + client->buf_len, BUF_SIZE - client->buf_len - 1);
+                    
+                    if (bytes_read < 0) {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) break; // Drained
+                        if (errno == EINTR) continue;
+                        log_error("read error"); // Real error
+                        break;
+                    }
+                    if (bytes_read == 0) {
+                        break; // Client closed
+                    }
+
                     client->buf_len += bytes_read;
                     client->buffer[client->buf_len] = '\0';
 
@@ -198,7 +233,7 @@ int server_start(int port) {
                             process_command(client, &cmd);
                             consumed_total += parsed;
                         } else if (parsed == 0) {
-                            break;
+                            break; // Incomplete
                         } else {
                             send_response(client->fd, "-ERR Protocol error\r\n");
                             consumed_total = client->buf_len;
@@ -211,6 +246,14 @@ int server_start(int port) {
                         memmove(client->buffer, client->buffer + consumed_total, remaining);
                         client->buf_len = remaining;
                     }
+                }
+
+                // If loop broke due to error or close, clean up
+                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                    log_info("Client disconnected (fd=%d)", client->fd);
+                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client->fd, NULL);
+                    close(client->fd);
+                    free(client);
                 }
             }
         }

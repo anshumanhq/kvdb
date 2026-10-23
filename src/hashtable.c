@@ -137,20 +137,24 @@ int ht_set(hashtable *ht,
     return 1;
 }
 
-void *ht_get(hashtable *ht,
-             const char *key, size_t key_len,
-             size_t *out_len)
+void *ht_get(hashtable *ht, const char *key, size_t key_len, size_t *out_len)
 {
     uint64_t h = fnv1a(key, key_len);
     size_t idx = h & ht->mask;
 
-    for (entry *e = ht->buckets[idx]; e; e = e->next) {
+    entry **prev = &ht->buckets[idx]; // Double pointer to delete safely
+    for (entry *e = *prev; e; prev = &e->next, e = e->next) {
         if (e->hash == h && e->key_len == key_len &&
             memcmp(e->key, key, key_len) == 0) {
-            /* Lazy expiry check */
+            
+            // Lazy Expiry: Delete from memory if expired
             if (e->expire_at > 0 && e->expire_at <= time(NULL)) {
+                *prev = e->next;
+                entry_free(e);
+                ht->used--;
                 return NULL;
             }
+            
             if (out_len) *out_len = e->val_len;
             return e->value;
         }

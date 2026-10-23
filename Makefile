@@ -38,7 +38,7 @@ test: $(BUILD_DIR)/test_hashtable
 $(BUILD_DIR)/test_hashtable: $(TEST_DIR)/test_hashtable.c $(SRC_DIR)/hashtable.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -o $@ $^
 
-# Release-mode test, Valgrind ke liye (ASan aur Valgrind ek saath nahi chalte)
+# Release-mode test for Valgrind (no sanitizers)
 test-release: CFLAGS += $(RELEASE_CFLAGS) -I$(SRC_DIR)
 test-release: $(BUILD_DIR)/test_hashtable_release
 	./$(BUILD_DIR)/test_hashtable_release
