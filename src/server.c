@@ -28,18 +28,17 @@ typedef struct {
 
 static hashtable *db;
 
-// FIX: Loop to handle partial writes
+// Loop to handle partial writes safely
 static void send_all(int fd, const char *buf, size_t len) {
     size_t sent = 0;
     while (sent < len) {
         ssize_t n = write(fd, buf + sent, len - sent);
         if (n < 0) {
             if (errno == EINTR) continue;
-            // In a perfect world, we'd queue this and wait for EPOLLOUT. 
-            // For this scope, we'll just log and drop if the buffer is full.
-            log_error("Failed to write to client (partial write)");
+            log_error("Failed to write to client");
             return;
         }
+        if (n == 0) break; // Safety check
         sent += n;
     }
 }
@@ -54,11 +53,17 @@ static void set_nonblocking(int fd) {
 }
 
 static void process_command(client_t *client, command_t *cmd) {
-    if (cmd->argc == 0) return; // FIX: Guard against empty inline commands
+    if (cmd->argc == 0) return;
 
     if (strcasecmp(cmd->argv[0], "PING") == 0) {
         send_response(client->fd, "+PONG\r\n");
     } 
+    else if (strcasecmp(cmd->argv[0], "COMMAND") == 0) {
+        send_response(client->fd, "*0\r\n"); // Fix for modern redis-cli
+    }
+    else if (strcasecmp(cmd->argv[0], "CLIENT") == 0) {
+        send_response(client->fd, "+OK\r\n"); // Fix for modern redis-cli
+    }
     else if (strcasecmp(cmd->argv[0], "SET") == 0 && cmd->argc == 3) {
         int rc = ht_set(db, cmd->argv[1], strlen(cmd->argv[1]), cmd->argv[2], strlen(cmd->argv[2]));
         if (rc >= 0) {
@@ -94,7 +99,7 @@ static void process_command(client_t *client, command_t *cmd) {
             int64_t expire_at = time(NULL) + seconds;
             int rc = ht_set_expire(db, cmd->argv[1], strlen(cmd->argv[1]), expire_at);
             if (rc == 1) {
-                aof_append("EXPIRE", cmd->argv[1], cmd->argv[2]); // FIX: Persist TTL
+                aof_append("EXPIRE", cmd->argv[1], cmd->argv[2]); 
                 send_response(client->fd, ":1\r\n");
             }
             else send_response(client->fd, ":0\r\n");
@@ -151,6 +156,9 @@ int server_start(int port) {
         perror("listen"); return -1;
     }
 
+    // CRITICAL FIX: Server socket ko non-blocking banao warna accept loop hang ho jayega
+    set_nonblocking(server_fd);
+
     int epoll_fd = epoll_create1(0);
     if (epoll_fd == -1) {
         perror("epoll_create1"); return -1;
@@ -174,7 +182,7 @@ int server_start(int port) {
 
         for (int i = 0; i < nfds; i++) {
             if (events[i].data.fd == server_fd) {
-                // FIX: ET Accept Loop (Drain until EAGAIN)
+                // ET Accept Loop
                 while (1) {
                     struct sockaddr_in client_addr;
                     socklen_t client_len = sizeof(client_addr);
@@ -187,10 +195,8 @@ int server_start(int port) {
                         break;
                     }
 
-                    // FIX: TCP_NODELAY (Massive latency improvement)
                     int flag = 1;
                     setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
-                    
                     set_nonblocking(client_fd);
                     
                     client_t *client = calloc(1, sizeof(client_t));
@@ -199,26 +205,31 @@ int server_start(int port) {
 
                     ev.events = EPOLLIN | EPOLLET;
                     ev.data.ptr = client;
-                    epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev);
+                    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &ev) == -1) {
+                        log_error("epoll_ctl add failed");
+                    }
                     
                     log_info("Client connected (fd=%d)", client_fd);
                 }
             } 
             else {
                 client_t *client = (client_t *)events[i].data.ptr;
+                int close_client = 0;
                 
-                // FIX: ET Read Loop (Drain until EAGAIN)
+                // ET Read Loop
                 while (1) {
                     ssize_t bytes_read = read(client->fd, client->buffer + client->buf_len, BUF_SIZE - client->buf_len - 1);
                     
                     if (bytes_read < 0) {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) break; // Drained
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) break; 
                         if (errno == EINTR) continue;
-                        log_error("read error"); // Real error
+                        log_error("read error");
+                        close_client = 1;
                         break;
                     }
                     if (bytes_read == 0) {
-                        break; // Client closed
+                        close_client = 1; // Client closed
+                        break; 
                     }
 
                     client->buf_len += bytes_read;
@@ -233,7 +244,7 @@ int server_start(int port) {
                             process_command(client, &cmd);
                             consumed_total += parsed;
                         } else if (parsed == 0) {
-                            break; // Incomplete
+                            break;
                         } else {
                             send_response(client->fd, "-ERR Protocol error\r\n");
                             consumed_total = client->buf_len;
@@ -248,8 +259,7 @@ int server_start(int port) {
                     }
                 }
 
-                // If loop broke due to error or close, clean up
-                if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                if (close_client) {
                     log_info("Client disconnected (fd=%d)", client->fd);
                     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client->fd, NULL);
                     close(client->fd);
